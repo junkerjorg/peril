@@ -67,7 +67,10 @@ impl<'registry, T: 'static> HazardValue<'registry, T> {
     pub fn boxed(value: T) -> HazardValue<'registry, T> {
         let boxed = Box::new(WrappedValue { value });
         let ptr = Box::into_raw(boxed);
-        assert!(!Self::is_dummy(ptr), "unexpected high bit set in allocation");
+        assert!(
+            !Self::is_dummy(ptr),
+            "unexpected high bit set in allocation"
+        );
         HazardValue::Boxed {
             ptr,
             registry: None,
@@ -107,12 +110,11 @@ impl<'registry, T: 'static> HazardValue<'registry, T> {
     fn as_ptr(&self) -> *mut WrappedValue<T> {
         match self {
             HazardValue::Boxed { ptr, .. } => *ptr,
-            HazardValue::Dummy { ptr } => 
-            {
+            HazardValue::Dummy { ptr } => {
                 let ptr = *ptr;
                 let mask = 1_usize << (usize::BITS - 1);
                 (ptr as usize & !mask) as *mut WrappedValue<T>
-            },
+            }
         }
     }
 
@@ -393,8 +395,7 @@ pub struct HazardRegistry {
 impl Drop for HazardSlots {
     fn drop(&mut self) {
         let next = self.next.load(Ordering::Relaxed);
-        if next != std::ptr::null_mut()
-        {
+        if next != std::ptr::null_mut() {
             let boxed = unsafe { Box::from_raw(next) };
             drop(boxed);
         }
