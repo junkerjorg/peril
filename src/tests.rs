@@ -20,7 +20,7 @@ impl<T: Clone> HazardVector<T> {
         let mut allocation = self.registry.alloc();
         loop {
             let scope = self.hp.protect(&mut allocation);
-            let (dummy, reference) = scope.as_ref(Ordering::Relaxed);
+            let reference = scope.as_ref();
             let reference = reference.unwrap();
             let mut new = (*reference).clone();
 
@@ -28,7 +28,6 @@ impl<T: Clone> HazardVector<T> {
 
             if scope
                 .compare_exchange_weak(
-                    dummy,
                     HazardValue::boxed(new),
                     Ordering::Relaxed,
                     Ordering::Relaxed,
@@ -44,7 +43,7 @@ impl<T: Clone> HazardVector<T> {
         let mut allocation = self.registry.alloc();
         loop {
             let scope = self.hp.protect(&mut allocation);
-            let (dummy, reference) = scope.as_ref(Ordering::Relaxed);
+            let reference = scope.as_ref();
             let reference = reference.unwrap();
             let mut new = (*reference).clone();
 
@@ -52,7 +51,6 @@ impl<T: Clone> HazardVector<T> {
 
             if scope
                 .compare_exchange_weak(
-                    dummy,
                     HazardValue::boxed(new),
                     Ordering::Relaxed,
                     Ordering::Relaxed,
@@ -64,11 +62,11 @@ impl<T: Clone> HazardVector<T> {
         }
     }
 
-    pub fn inner(&self) -> Vec<T> {
+    pub fn take_inner(&self) -> Vec<T> {
         let mut allocation = self.registry.alloc();
         let scope = self.hp.protect(&mut allocation);
-        let (_, reference) = scope.as_ref(Ordering::Relaxed);
-        reference.unwrap().clone()
+        let value = scope.swap_null(Ordering::Relaxed);
+        value.take().unwrap()
     }
 }
 
@@ -77,25 +75,40 @@ pub fn test_hazard_vector() {
     use std::sync::Arc;
     use std::thread;
 
-    let thread_count = 1024;
+    let thread_count = 128;
+    let loop_count = 53;
     let vec1 = Arc::new(HazardVector::<usize>::default());
     let vec2 = Arc::new(HazardVector::<usize>::default());
 
-    let handles = (0..thread_count).into_iter().map(|idx| {
-        let cpy1 = vec1.clone();
-        let cpy2 = vec2.clone();
-        thread::spawn(move || {
-            cpy1.push(idx);
-            cpy2.push(cpy1.pop().unwrap());
+    let handles: Vec<_> = (0..thread_count)
+        .into_iter()
+        .map(|idx| {
+            let cpy1 = vec1.clone();
+            let cpy2 = vec2.clone();
+            thread::spawn(move || {
+                thread::park();
+                let start = idx * loop_count;
+                for idx in start..start + loop_count {
+                    cpy1.push(idx);
+                }
+                for _ in 0..loop_count {
+                    cpy2.push(cpy1.pop().unwrap());
+                }
+            })
         })
-    });
+        .collect();
 
-    for child in handles {
+    for child in handles.iter() {
+        child.thread().unpark();
+    }
+
+    for child in handles.into_iter() {
         child.join().unwrap();
     }
 
-    assert!((*vec1).inner().len() == 0, "expected vec1 to be empty");
-    let mut vec2 = (*vec2).inner();
+    let vec1 = vec1.take_inner();
+    assert!(vec1.len() == 0, "expected vec1 to be empty");
+    let mut vec2 = vec2.take_inner();
     vec2.sort();
 
     for i in 0..vec2.len() {
