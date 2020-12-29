@@ -8,6 +8,8 @@ use std::sync::{
     Mutex,
 };
 
+pub mod tests;
+
 pub trait HazardTrait {}
 
 macro_rules! array
@@ -65,7 +67,7 @@ impl<'registry, T: 'static> HazardValue<'registry, T> {
     pub fn boxed(value: T) -> HazardValue<'registry, T> {
         let boxed = Box::new(WrappedValue { value });
         let ptr = Box::into_raw(boxed);
-        assert!(Self::is_dummy(ptr), "unexpected high bit set in allocation");
+        assert!(!Self::is_dummy(ptr), "unexpected high bit set in allocation");
         HazardValue::Boxed {
             ptr,
             registry: None,
@@ -96,17 +98,21 @@ impl<'registry, T: 'static> HazardValue<'registry, T> {
         }
     }
 
-    fn leak(mut self) -> *mut WrappedValue<T> {
+    fn leak(self) -> *mut WrappedValue<T> {
         let ptr = self.as_ptr();
-        self = HazardValue::dummy(ptr as usize);
-        drop(self);
+        std::mem::forget(self);
         ptr
     }
 
     fn as_ptr(&self) -> *mut WrappedValue<T> {
         match self {
             HazardValue::Boxed { ptr, .. } => *ptr,
-            HazardValue::Dummy { ptr } => *ptr,
+            HazardValue::Dummy { ptr } => 
+            {
+                let ptr = *ptr;
+                let mask = 1_usize << (usize::BITS - 1);
+                (ptr as usize & !mask) as *mut WrappedValue<T>
+            },
         }
     }
 
@@ -259,7 +265,7 @@ impl<'registry, 'hazard, T: 'static> HazardScope<'registry, 'hazard, T> {
     pub fn as_ref(&self, order: Ordering) -> (HazardValue<'registry, T>, Option<&T>) {
         let ptr = self.ptr.atomic.load(order);
         if HazardValue::is_dummy(ptr) {
-            (HazardValue::dummy(ptr as usize), None)
+            (HazardValue::from_ptr(ptr, None), None)
         } else {
             let reference = unsafe { &*ptr };
             (HazardValue::dummy(ptr as usize), Some(&reference.value))
@@ -294,8 +300,16 @@ impl<T: 'static> Drop for HazardPtr<T> {
     }
 }
 
+#[repr(align(64))]
+struct AtomicPointer(AtomicPtr<()>);
+
+impl Default for AtomicPointer {
+    fn default() -> Self {
+        AtomicPointer(AtomicPtr::new(std::ptr::null_mut()))
+    }
+}
 struct HazardSlots {
-    slots: [AtomicPtr<()>; 64],
+    slots: [AtomicPointer; 64],
     next: AtomicPtr<HazardSlots>,
     mutex: Mutex<()>,
 }
@@ -303,7 +317,7 @@ struct HazardSlots {
 impl HazardSlots {
     fn new() -> HazardSlots {
         HazardSlots {
-            slots: array![AtomicPtr::default(); 64],
+            slots: array![ AtomicPointer::default(); 64],
             next: AtomicPtr::default(),
             mutex: Mutex::new(()),
         }
@@ -317,13 +331,13 @@ impl HazardSlots {
         let lock = self.mutex.lock();
         if self.next.load(Ordering::Relaxed) == std::ptr::null_mut() {
             let next = Box::new(HazardSlots::new());
-            next.slots[0].store(1 as *mut (), Ordering::Relaxed);
+            next.slots[0].0.store(1 as *mut (), Ordering::Relaxed);
             let next = Box::into_raw(next);
             self.next.store(next, Ordering::Relaxed);
             registry.numslots.fetch_add(64, Ordering::Relaxed);
             let next = unsafe { &*next };
             return HazardRecord {
-                record: &next.slots[0],
+                record: &next.slots[0].0,
                 registry,
             };
         }
@@ -340,7 +354,10 @@ impl HazardSlots {
         registry: &'registry HazardRegistry,
     ) -> HazardRecord<'registry> {
         for i in 0..64 {
-            if self.slots[tid + i % 64]
+            let index = (tid + i) % 64;
+            assert!(index < 64);
+            if self.slots[index]
+                .0
                 .compare_exchange_weak(
                     std::ptr::null_mut(),
                     1 as *mut (),
@@ -350,7 +367,7 @@ impl HazardSlots {
                 .is_ok()
             {
                 return HazardRecord {
-                    record: &self.slots[tid + i % 64],
+                    record: &self.slots[index].0,
                     registry,
                 };
             }
@@ -376,8 +393,11 @@ pub struct HazardRegistry {
 impl Drop for HazardSlots {
     fn drop(&mut self) {
         let next = self.next.load(Ordering::Relaxed);
-        let boxed = unsafe { Box::from_raw(next) };
-        drop(boxed);
+        if next != std::ptr::null_mut()
+        {
+            let boxed = unsafe { Box::from_raw(next) };
+            drop(boxed);
+        }
     }
 }
 
@@ -410,7 +430,7 @@ impl HazardRegistry {
         let mut slots = &self.slots;
         loop {
             for i in 0..64 {
-                let slot = slots.slots[i].load(Ordering::Relaxed);
+                let slot = slots.slots[i].0.load(Ordering::Relaxed);
                 if slot != std::ptr::null_mut() {
                     arr.push(slot);
                 }
