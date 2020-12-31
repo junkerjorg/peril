@@ -1,5 +1,3 @@
-#![feature(int_bits_const)]
-
 use os_thread_local::ThreadLocal;
 use std::boxed::Box;
 use std::cell::RefCell;
@@ -50,9 +48,9 @@ impl<'registry, T: 'static> HazardValue<'registry, T> {
     pub fn boxed(value: T) -> HazardValue<'registry, T> {
         let boxed = Box::new(WrappedValue { value });
         let ptr = Box::into_raw(boxed);
-        assert!(
+        debug_assert!(
             !Self::is_dummy(ptr),
-            "unexpected high bit set in allocation"
+            "unexpected low bit set in allocation"
         );
         HazardValue::Boxed {
             ptr,
@@ -61,15 +59,15 @@ impl<'registry, T: 'static> HazardValue<'registry, T> {
     }
 
     pub fn dummy(value: usize) -> HazardValue<'registry, T> {
-        let mask = 1_usize << (usize::BITS - 1);
-        assert!((value & mask) == 0, "high bit is used to flag dummies");
+        let max = usize::MAX >> 1;
+        assert!(value <= max, "High bit is needed for internal information");
         HazardValue::Dummy {
-            ptr: (value | mask) as *mut WrappedValue<T>,
+            ptr: ((value << 1) | 1) as *mut WrappedValue<T>,
         }
     }
 
     fn is_dummy(ptr: *mut WrappedValue<T>) -> bool {
-        let mask = 1_usize << (usize::BITS - 1);
+        let mask = 1_usize;
         ((ptr as usize) & mask) != 0
     }
 
@@ -95,8 +93,7 @@ impl<'registry, T: 'static> HazardValue<'registry, T> {
             HazardValue::Boxed { ptr, .. } => *ptr,
             HazardValue::Dummy { ptr } => {
                 let ptr = *ptr;
-                let mask = 1_usize << (usize::BITS - 1);
-                (ptr as usize & !mask) as *mut WrappedValue<T>
+                (ptr as usize >> 1) as *mut WrappedValue<T>
             }
         }
     }
@@ -165,7 +162,7 @@ impl<'registry> HazardRecord<'registry> {
     fn acquire<T>(&mut self, atomic: &AtomicPtr<WrappedValue<T>>) -> *mut WrappedValue<T> {
         let mut ptr = atomic.load(Ordering::Acquire);
         loop {
-            assert!(
+            debug_assert!(
                 ptr != std::ptr::null_mut(),
                 "null is reserved to mark free slots"
             );
@@ -436,7 +433,7 @@ impl HazardRegistry {
     }
 
     fn free(HazardRecord { record, .. }: &mut HazardRecord) {
-        assert!(
+        debug_assert!(
             record.load(Ordering::Relaxed) != std::ptr::null_mut(),
             "null is reserved to mark free slots"
         );
