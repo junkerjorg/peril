@@ -48,10 +48,7 @@ impl<'registry, T: 'static> HazardValue<'registry, T> {
     pub fn boxed(value: T) -> HazardValue<'registry, T> {
         let boxed = Box::new(WrappedValue { value });
         let ptr = Box::into_raw(boxed);
-        debug_assert!(
-            !Self::is_dummy(ptr),
-            "unexpected low bit set in allocation"
-        );
+        debug_assert!(!Self::is_dummy(ptr), "unexpected low bit set in allocation");
         HazardValue::Boxed {
             ptr,
             registry: None,
@@ -308,6 +305,17 @@ struct HazardSlots {
     mutex: Mutex<()>,
 }
 
+impl Drop for HazardSlots {
+    fn drop(&mut self) {
+        let next = self.next.load(Ordering::Relaxed);
+        if next != std::ptr::null_mut() {
+            let boxed = unsafe { Box::from_raw(next) };
+            drop(boxed);
+        }
+        self.next = AtomicPtr::default();
+    }
+}
+
 impl HazardSlots {
     fn new() -> HazardSlots {
         HazardSlots {
@@ -385,15 +393,13 @@ impl Drop for DeletedList {
         if self.1 != std::ptr::null() {
             let registry = unsafe { &*self.1 };
             loop {
+                if self.0.is_empty() {
+                    break;
+                }
                 let hazards = registry.scan();
                 self.0.retain(|DeletedItem(ptr, ..)| {
                     hazards.binary_search(&(*ptr as *mut ())).is_ok()
                 });
-
-                if self.0.len() == 0 {
-                    break;
-                }
-
                 std::thread::yield_now();
             }
         }
@@ -404,16 +410,6 @@ pub struct HazardRegistry {
     slots: HazardSlots,
     numslots: AtomicUsize,
     deleted: ThreadLocal<RefCell<DeletedList>>,
-}
-
-impl Drop for HazardSlots {
-    fn drop(&mut self) {
-        let next = self.next.load(Ordering::Relaxed);
-        if next != std::ptr::null_mut() {
-            let boxed = unsafe { Box::from_raw(next) };
-            drop(boxed);
-        }
-    }
 }
 
 impl Default for HazardRegistry {
