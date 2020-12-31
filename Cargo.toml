@@ -1,10 +1,10 @@
 [package]
 name = "peril"
-version = "0.0.3"
+version = "0.0.4"
 authors = ["junkerjorg <junkerjorg(twenty-one)(at)protonmail(dot)ch>"]
 edition = "2018"
 keywords = ["hazard", "pointer", "hazardpointer", "lock-free", "reclaimation"]
-description = "Safe Hazard pointers for Rust."
+description = "Fast and safe Hazard pointers for Rust."
 license = "MIT"
 homepage = "https://github.com/junkerjorg/peril"
 repository = "https://github.com/junkerjorg/peril"

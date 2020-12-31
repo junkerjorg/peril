@@ -32,6 +32,8 @@ pub struct WrappedValue<T: 'static> {
     value: T,
 }
 
+unsafe impl<T: 'static> Send for WrappedValue<T> {}
+
 impl<T: 'static> HazardTrait for WrappedValue<T> {}
 
 pub enum HazardValue<'registry, T: 'static> {
@@ -377,7 +379,30 @@ impl HazardSlots {
     }
 }
 
-type DeletedList = Vec<(*mut (), Box<dyn HazardTrait>)>;
+struct DeletedItem(*mut (), Box<dyn HazardTrait>);
+
+struct DeletedList(Vec<DeletedItem>, *const HazardRegistry);
+
+impl Drop for DeletedList {
+    fn drop(&mut self) {
+        if self.1 != std::ptr::null() {
+            let registry = unsafe { &*self.1 };
+            loop {
+                let hazards = registry.scan();
+                self.0.retain(|DeletedItem(ptr, ..)| {
+                    hazards.binary_search(&(*ptr as *mut ())).is_ok()
+                });
+
+                if self.0.len() == 0 {
+                    break;
+                }
+
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
 pub struct HazardRegistry {
     slots: HazardSlots,
     numslots: AtomicUsize,
@@ -399,7 +424,7 @@ impl Default for HazardRegistry {
         HazardRegistry {
             slots: HazardSlots::new(),
             numslots: AtomicUsize::new(HP_CHUNKS),
-            deleted: ThreadLocal::new(|| RefCell::new(Vec::new())),
+            deleted: ThreadLocal::new(|| RefCell::new(DeletedList(Vec::new(), std::ptr::null()))),
         }
     }
 }
@@ -442,23 +467,19 @@ impl HazardRegistry {
 
     fn delete<T>(&self, raw: *mut WrappedValue<T>) {
         self.deleted.with(|arr| {
-            let len;
-            {
-                let mut arr = arr.borrow_mut();
+            arr.replace_with(|&mut DeletedList(ref mut old, _)| {
                 let boxed = unsafe { Box::from_raw(raw) };
-                arr.push((raw as *mut (), boxed as Box<dyn HazardTrait>));
-                len = arr.len();
-            }
+                let boxed = boxed as Box<dyn HazardTrait>;
+                old.push(DeletedItem(raw as *mut (), boxed));
 
-            if len >= (5 * self.numslots.load(Ordering::Relaxed)) / 4 {
-                let old = arr.replace(Vec::new());
-                let hazards = self.scan();
-                let new_arr: Vec<(*mut (), Box<dyn HazardTrait>)> = old
-                    .into_iter()
-                    .filter(|(ptr, _)| hazards.binary_search(ptr).is_ok())
-                    .collect();
-                arr.replace(new_arr);
-            }
+                if old.len() >= (5 * self.numslots.load(Ordering::Relaxed)) / 4 {
+                    let hazards = self.scan();
+                    old.retain(|DeletedItem(ptr, ..)| {
+                        hazards.binary_search(&(*ptr as *mut ())).is_ok()
+                    });
+                }
+                DeletedList(old.split_off(0), self as *const Self)
+            });
         });
     }
 }

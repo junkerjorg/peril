@@ -1,27 +1,26 @@
 use crate::{HazardPtr, HazardRegistry, HazardValue};
 use std::sync::atomic::Ordering;
 
-pub struct HazardVector<T: 'static> {
+pub struct HazardStack<T: 'static> {
     registry: HazardRegistry,
     hp: HazardPtr<Vec<T>>,
 }
 
-impl<T: Clone> Default for HazardVector<T> {
+impl<T: Clone> Default for HazardStack<T> {
     fn default() -> Self {
-        HazardVector {
+        HazardStack {
             registry: HazardRegistry::default(),
             hp: HazardPtr::new(HazardValue::boxed(Vec::new())),
         }
     }
 }
 
-impl<T: Clone> HazardVector<T> {
+impl<T: Clone> HazardStack<T> {
     pub fn push(&self, item: T) {
-        let mut allocation = self.registry.alloc();
+        let mut record = self.registry.alloc();
         loop {
-            let scope = self.hp.protect(&mut allocation);
-            let reference = scope.as_ref();
-            let reference = reference.unwrap();
+            let scope = self.hp.protect(&mut record);
+            let reference = scope.as_ref().unwrap();
             let mut new = (*reference).clone();
 
             new.push(item.clone());
@@ -40,11 +39,10 @@ impl<T: Clone> HazardVector<T> {
     }
 
     pub fn pop(&self) -> Option<T> {
-        let mut allocation = self.registry.alloc();
+        let mut record = self.registry.alloc();
         loop {
-            let scope = self.hp.protect(&mut allocation);
-            let reference = scope.as_ref();
-            let reference = reference.unwrap();
+            let scope = self.hp.protect(&mut record);
+            let reference = scope.as_ref().unwrap();
             let mut new = (*reference).clone();
 
             let ret = new.pop();
@@ -65,7 +63,7 @@ impl<T: Clone> HazardVector<T> {
     pub fn take_inner(&self) -> Vec<T> {
         let mut allocation = self.registry.alloc();
         let scope = self.hp.protect(&mut allocation);
-        let value = scope.swap_null(Ordering::Relaxed);
+        let value = scope.swap(HazardValue::boxed(Vec::new()), Ordering::Relaxed);
         value.take().unwrap()
     }
 }
@@ -77,8 +75,8 @@ pub fn test_hazard_vector() {
 
     let thread_count = 128;
     let loop_count = 53;
-    let vec1 = Arc::new(HazardVector::<usize>::default());
-    let vec2 = Arc::new(HazardVector::<usize>::default());
+    let vec1 = Arc::new(HazardStack::<usize>::default());
+    let vec2 = Arc::new(HazardStack::<usize>::default());
 
     let handles: Vec<_> = (0..thread_count)
         .into_iter()
