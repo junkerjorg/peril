@@ -1,11 +1,11 @@
 use crate::{HazardPtr, HazardRecord, HazardRegistry, HazardValue};
 use std::sync::atomic::Ordering;
 
-pub struct HazardStack<T: 'static> {
+pub struct HazardStack<T: Send + Clone> {
     hp: HazardPtr<Vec<T>>,
 }
 
-impl<T: Clone> Default for HazardStack<T> {
+impl<T: Send + Clone> Default for HazardStack<T> {
     fn default() -> Self {
         let registry = HazardRegistry::default();
         let hp = HazardPtr::new(HazardValue::boxed(Vec::new()), &registry);
@@ -13,7 +13,7 @@ impl<T: Clone> Default for HazardStack<T> {
     }
 }
 
-impl<T: Clone> HazardStack<T> {
+impl<T: Send + Clone> HazardStack<T> {
     pub fn push(&self, item: T) {
         let mut record = HazardRecord::default();
         loop {
