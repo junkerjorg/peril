@@ -1,23 +1,21 @@
-use crate::{HazardPtr, HazardRegistry, HazardValue};
+use crate::{HazardPtr, HazardRecord, HazardRegistry, HazardValue};
 use std::sync::atomic::Ordering;
 
 pub struct HazardStack<T: 'static> {
-    registry: HazardRegistry,
     hp: HazardPtr<Vec<T>>,
 }
 
 impl<T: Clone> Default for HazardStack<T> {
     fn default() -> Self {
-        HazardStack {
-            registry: HazardRegistry::default(),
-            hp: HazardPtr::new(HazardValue::boxed(Vec::new())),
-        }
+        let registry = HazardRegistry::default();
+        let hp = HazardPtr::new(HazardValue::boxed(Vec::new()), &registry);
+        HazardStack { hp }
     }
 }
 
 impl<T: Clone> HazardStack<T> {
     pub fn push(&self, item: T) {
-        let mut record = self.registry.alloc();
+        let mut record = HazardRecord::default();
         loop {
             let scope = self.hp.protect(&mut record);
             let reference = scope.as_ref().unwrap();
@@ -39,7 +37,7 @@ impl<T: Clone> HazardStack<T> {
     }
 
     pub fn pop(&self) -> Option<T> {
-        let mut record = self.registry.alloc();
+        let mut record = HazardRecord::default();
         loop {
             let scope = self.hp.protect(&mut record);
             let reference = scope.as_ref().unwrap();
@@ -61,9 +59,9 @@ impl<T: Clone> HazardStack<T> {
     }
 
     pub fn take_inner(&self) -> Vec<T> {
-        let mut allocation = self.registry.alloc();
-        let scope = self.hp.protect(&mut allocation);
-        let value = scope.swap(HazardValue::boxed(Vec::new()), Ordering::Relaxed);
+        let value = self
+            .hp
+            .swap(HazardValue::boxed(Vec::new()), Ordering::Relaxed);
         value.take().unwrap()
     }
 }

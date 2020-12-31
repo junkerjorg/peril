@@ -3,7 +3,7 @@ use std::boxed::Box;
 use std::cell::RefCell;
 use std::sync::{
     atomic::{AtomicPtr, AtomicUsize, Ordering},
-    Mutex,
+    Arc, Mutex,
 };
 
 pub mod tests;
@@ -34,49 +34,20 @@ unsafe impl<T: 'static> Send for WrappedValue<T> {}
 
 impl<T: 'static> HazardTrait for WrappedValue<T> {}
 
-pub enum HazardValue<'registry, T: 'static> {
+enum HazardValueImpl<'registry, T: 'static> {
     Boxed {
         ptr: *mut WrappedValue<T>,
-        registry: Option<&'registry HazardRegistry>,
+        registry: Option<&'registry HazardRegistryImpl>,
     },
     Dummy {
         ptr: *mut WrappedValue<T>,
     },
 }
 
-impl<'registry, T: 'static> HazardValue<'registry, T> {
-    pub fn boxed(value: T) -> HazardValue<'registry, T> {
-        let boxed = Box::new(WrappedValue { value });
-        let ptr = Box::into_raw(boxed);
-        debug_assert!(!Self::is_dummy(ptr), "unexpected low bit set in allocation");
-        HazardValue::Boxed {
-            ptr,
-            registry: None,
-        }
-    }
-
-    pub fn dummy(value: usize) -> HazardValue<'registry, T> {
-        let max = usize::MAX >> 1;
-        assert!(value <= max, "High bit is needed for internal information");
-        HazardValue::Dummy {
-            ptr: ((value << 1) | 1) as *mut WrappedValue<T>,
-        }
-    }
-
+impl<'registry, T: 'static> HazardValueImpl<'registry, T> {
     fn is_dummy(ptr: *mut WrappedValue<T>) -> bool {
         let mask = 1_usize;
         ((ptr as usize) & mask) != 0
-    }
-
-    fn from_ptr(
-        ptr: *mut WrappedValue<T>,
-        registry: Option<&'registry HazardRegistry>,
-    ) -> HazardValue<'registry, T> {
-        if Self::is_dummy(ptr) {
-            HazardValue::Dummy { ptr }
-        } else {
-            HazardValue::Boxed { ptr, registry }
-        }
     }
 
     fn leak(self) -> *mut WrappedValue<T> {
@@ -87,46 +58,18 @@ impl<'registry, T: 'static> HazardValue<'registry, T> {
 
     fn as_ptr(&self) -> *mut WrappedValue<T> {
         match self {
-            HazardValue::Boxed { ptr, .. } => *ptr,
-            HazardValue::Dummy { ptr } => {
+            HazardValueImpl::Boxed { ptr, .. } => *ptr,
+            HazardValueImpl::Dummy { ptr } => {
                 let ptr = *ptr;
                 (ptr as usize >> 1) as *mut WrappedValue<T>
             }
         }
     }
-
-    pub fn as_ref(&self) -> Option<&T> {
-        if let HazardValue::Boxed { ptr, .. } = self {
-            let ptr = unsafe { &**ptr };
-            Some(&ptr.value)
-        } else {
-            None
-        }
-    }
-
-    pub fn as_mut(&mut self) -> Option<&mut T> {
-        if let HazardValue::Boxed { ptr, .. } = self {
-            let ptr = unsafe { &mut **ptr };
-            Some(&mut ptr.value)
-        } else {
-            None
-        }
-    }
-
-    pub fn take(self) -> Option<T> {
-        if let HazardValue::Boxed { ptr, .. } = self {
-            let boxed = unsafe { Box::from_raw(ptr) };
-            self.leak();
-            Some(boxed.value)
-        } else {
-            None
-        }
-    }
 }
 
-impl<'registry, T: 'static> Drop for HazardValue<'registry, T> {
+impl<'registry, T: 'static> Drop for HazardValueImpl<'registry, T> {
     fn drop(&mut self) {
-        if let HazardValue::Boxed { ptr, registry } = self {
+        if let HazardValueImpl::Boxed { ptr, registry } = self {
             let ptr = *ptr;
             if ptr != std::ptr::null_mut() {
                 if let Some(registry) = registry.take() {
@@ -140,22 +83,82 @@ impl<'registry, T: 'static> Drop for HazardValue<'registry, T> {
     }
 }
 
-pub struct HazardPtr<T: 'static> {
-    atomic: AtomicPtr<WrappedValue<T>>,
-}
+pub struct HazardValue<'registry, T: 'static>(HazardValueImpl<'registry, T>);
 
-pub struct HazardRecord<'registry> {
-    record: &'registry AtomicPtr<()>,
-    registry: &'registry HazardRegistry,
-}
+impl<'registry, T: 'static> HazardValue<'registry, T> {
+    pub fn boxed(value: T) -> HazardValue<'registry, T> {
+        let boxed = Box::new(WrappedValue { value });
+        let ptr = Box::into_raw(boxed);
+        debug_assert!(
+            !HazardValueImpl::is_dummy(ptr),
+            "unexpected low bit set in allocation"
+        );
+        HazardValue(HazardValueImpl::Boxed {
+            ptr,
+            registry: None,
+        })
+    }
 
-impl<'registry> Drop for HazardRecord<'registry> {
-    fn drop(&mut self) {
-        HazardRegistry::free(self);
+    pub fn dummy(value: usize) -> HazardValue<'registry, T> {
+        let max = usize::MAX >> 1;
+        assert!(value <= max, "High bit is needed for internal information");
+        HazardValue(HazardValueImpl::Dummy {
+            ptr: ((value << 1) | 1) as *mut WrappedValue<T>,
+        })
+    }
+
+    fn from_ptr(
+        ptr: *mut WrappedValue<T>,
+        registry: Option<&'registry HazardRegistryImpl>,
+    ) -> HazardValue<'registry, T> {
+        if HazardValueImpl::is_dummy(ptr) {
+            HazardValue(HazardValueImpl::Dummy { ptr })
+        } else {
+            HazardValue(HazardValueImpl::Boxed { ptr, registry })
+        }
+    }
+
+    pub fn as_ref(&self) -> Option<&T> {
+        if let HazardValueImpl::Boxed { ptr, .. } = self.0 {
+            let ptr = unsafe { &*ptr };
+            Some(&ptr.value)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_mut(&mut self) -> Option<&mut T> {
+        if let HazardValueImpl::Boxed { ptr, .. } = self.0 {
+            let ptr = unsafe { &mut *ptr };
+            Some(&mut ptr.value)
+        } else {
+            None
+        }
+    }
+
+    pub fn take(self) -> Option<T> {
+        if let HazardValueImpl::Boxed { ptr, .. } = self.0 {
+            let boxed = unsafe { Box::from_raw(ptr) };
+            self.0.leak();
+            Some(boxed.value)
+        } else {
+            None
+        }
     }
 }
 
-impl<'registry> HazardRecord<'registry> {
+struct HazardRecordImpl<'registry> {
+    record: &'registry AtomicPtr<()>,
+    registry: &'registry HazardRegistryImpl,
+}
+
+impl<'registry> Drop for HazardRecordImpl<'registry> {
+    fn drop(&mut self) {
+        HazardRegistryImpl::free(self);
+    }
+}
+
+impl<'registry> HazardRecordImpl<'registry> {
     fn acquire<T>(&mut self, atomic: &AtomicPtr<WrappedValue<T>>) -> *mut WrappedValue<T> {
         let mut ptr = atomic.load(Ordering::Acquire);
         loop {
@@ -177,15 +180,25 @@ impl<'registry> HazardRecord<'registry> {
     }
 }
 
+pub struct HazardRecord<'registry> {
+    record: Option<HazardRecordImpl<'registry>>,
+}
+
+impl<'registry> Default for HazardRecord<'registry> {
+    fn default() -> Self {
+        HazardRecord { record: None }
+    }
+}
+
 pub struct HazardScope<'registry, 'hazard, T: 'static> {
-    allocation: &'hazard mut HazardRecord<'registry>,
+    record: &'hazard mut HazardRecordImpl<'registry>,
     ptr: &'registry HazardPtr<T>,
     current: *mut WrappedValue<T>,
 }
 
 impl<'registry, 'hazard, T: 'static> Drop for HazardScope<'registry, 'hazard, T> {
     fn drop(&mut self) {
-        self.allocation.release();
+        self.record.release();
     }
 }
 
@@ -199,12 +212,12 @@ impl<'registry, 'hazard, T: 'static> HazardScope<'registry, 'hazard, T> {
         match self
             .ptr
             .atomic
-            .compare_exchange_weak(self.current, new.as_ptr(), success, failure)
+            .compare_exchange_weak(self.current, new.0.as_ptr(), success, failure)
         {
             Ok(old) => {
-                new.leak();
-                self.allocation.release();
-                Ok(HazardValue::from_ptr(old, Some(self.allocation.registry)))
+                new.0.leak();
+                self.record.release();
+                Ok(HazardValue::from_ptr(old, Some(self.record.registry)))
             }
             Err(_) => Err(new),
         }
@@ -219,40 +232,19 @@ impl<'registry, 'hazard, T: 'static> HazardScope<'registry, 'hazard, T> {
         match self
             .ptr
             .atomic
-            .compare_exchange(self.current, new.as_ptr(), success, failure)
+            .compare_exchange(self.current, new.0.as_ptr(), success, failure)
         {
             Ok(old) => {
-                new.leak();
-                self.allocation.release();
-                Ok(HazardValue::from_ptr(old, Some(self.allocation.registry)))
+                new.0.leak();
+                self.record.release();
+                Ok(HazardValue::from_ptr(old, Some(self.record.registry)))
             }
             Err(_) => Err(new),
         }
     }
 
-    pub fn swap(
-        self,
-        new: HazardValue<'registry, T>,
-        order: Ordering,
-    ) -> HazardValue<'registry, T> {
-        let old = self.ptr.atomic.swap(new.leak(), order);
-        self.allocation.release();
-        HazardValue::from_ptr(old, Some(self.allocation.registry))
-    }
-
-    pub fn swap_null(self, order: Ordering) -> HazardValue<'registry, T> {
-        let old = self.ptr.atomic.swap(std::ptr::null_mut(), order);
-        self.allocation.release();
-        HazardValue::from_ptr(old, Some(self.allocation.registry))
-    }
-
-    pub fn store(self, new: HazardValue<'registry, T>, order: Ordering) {
-        let old = self.swap(new, order);
-        drop(old);
-    }
-
     pub fn as_ref(&self) -> Option<&T> {
-        if HazardValue::is_dummy(self.current) {
+        if HazardValueImpl::is_dummy(self.current) {
             None
         } else {
             let reference = unsafe { &*self.current };
@@ -261,24 +253,53 @@ impl<'registry, 'hazard, T: 'static> HazardScope<'registry, 'hazard, T> {
     }
 }
 
+pub struct HazardPtr<T: 'static> {
+    registry: Arc<HazardRegistryImpl>,
+    atomic: AtomicPtr<WrappedValue<T>>,
+}
+
 impl<T: 'static> HazardPtr<T> {
-    pub fn new(value: HazardValue<T>) -> HazardPtr<T> {
+    pub fn new(value: HazardValue<T>, registry: &HazardRegistry) -> HazardPtr<T> {
         HazardPtr {
-            atomic: AtomicPtr::new(value.leak()),
+            registry: registry.registry.clone(),
+            atomic: AtomicPtr::new(value.0.leak()),
         }
     }
 
     #[must_use]
     pub fn protect<'registry, 'hazard>(
         &'registry self,
-        allocation: &'hazard mut HazardRecord<'registry>,
+        record: &'hazard mut HazardRecord<'registry>,
     ) -> HazardScope<'registry, 'hazard, T> {
-        let current = allocation.acquire(&self.atomic);
+        if record.record.is_none() {
+            record.record = Some(self.registry.alloc());
+        }
+        let record = record.record.as_mut().unwrap();
+        let current = record.acquire(&self.atomic);
         HazardScope {
             ptr: self,
-            allocation,
+            record,
             current,
         }
+    }
+
+    pub fn swap<'registry>(
+        &'registry self,
+        new: HazardValue<'registry, T>,
+        order: Ordering,
+    ) -> HazardValue<'registry, T> {
+        let old = self.atomic.swap(new.0.leak(), order);
+        HazardValue::from_ptr(old, Some(&self.registry))
+    }
+
+    pub fn swap_null(&self, order: Ordering) -> HazardValue<'_, T> {
+        let old = self.atomic.swap(std::ptr::null_mut(), order);
+        HazardValue::from_ptr(old, Some(&self.registry))
+    }
+
+    pub fn store(&self, new: HazardValue<'_, T>, order: Ordering) {
+        let old = self.swap(new, order);
+        drop(old);
     }
 }
 
@@ -328,8 +349,8 @@ impl HazardSlots {
     fn grow<'registry>(
         &'registry self,
         tid: usize,
-        registry: &'registry HazardRegistry,
-    ) -> HazardRecord<'registry> {
+        registry: &'registry HazardRegistryImpl,
+    ) -> HazardRecordImpl<'registry> {
         let lock = self.mutex.lock();
         if self.next.load(Ordering::Acquire) == std::ptr::null_mut() {
             let next = Box::new(HazardSlots::new());
@@ -338,7 +359,7 @@ impl HazardSlots {
             self.next.store(next, Ordering::Release);
             registry.numslots.fetch_add(HP_CHUNKS, Ordering::Relaxed);
             let next = unsafe { &*next };
-            return HazardRecord {
+            return HazardRecordImpl {
                 record: &next.slots[0].0,
                 registry,
             };
@@ -350,11 +371,11 @@ impl HazardSlots {
         next.alloc(tid, registry)
     }
 
-    pub fn alloc<'registry>(
+    fn alloc<'registry>(
         &'registry self,
         tid: usize,
-        registry: &'registry HazardRegistry,
-    ) -> HazardRecord<'registry> {
+        registry: &'registry HazardRegistryImpl,
+    ) -> HazardRecordImpl<'registry> {
         for i in 0..HP_CHUNKS {
             let index = (tid + i) % HP_CHUNKS;
             if self.slots[index]
@@ -367,7 +388,7 @@ impl HazardSlots {
                 )
                 .is_ok()
             {
-                return HazardRecord {
+                return HazardRecordImpl {
                     record: &self.slots[index].0,
                     registry,
                 };
@@ -386,7 +407,7 @@ impl HazardSlots {
 
 struct DeletedItem(*mut (), Box<dyn HazardTrait>);
 
-struct DeletedList(Vec<DeletedItem>, *const HazardRegistry);
+struct DeletedList(Vec<DeletedItem>, *const HazardRegistryImpl);
 
 impl Drop for DeletedList {
     fn drop(&mut self) {
@@ -406,29 +427,19 @@ impl Drop for DeletedList {
     }
 }
 
-pub struct HazardRegistry {
+struct HazardRegistryImpl {
     slots: HazardSlots,
     numslots: AtomicUsize,
     deleted: ThreadLocal<RefCell<DeletedList>>,
 }
 
-impl Default for HazardRegistry {
-    fn default() -> Self {
-        HazardRegistry {
-            slots: HazardSlots::new(),
-            numslots: AtomicUsize::new(HP_CHUNKS),
-            deleted: ThreadLocal::new(|| RefCell::new(DeletedList(Vec::new(), std::ptr::null()))),
-        }
-    }
-}
-
-impl HazardRegistry {
-    pub fn alloc(&self) -> HazardRecord {
+impl HazardRegistryImpl {
+    fn alloc(&self) -> HazardRecordImpl {
         let tid = aquire_threadid();
         self.slots.alloc(tid, self)
     }
 
-    fn free(HazardRecord { record, .. }: &mut HazardRecord) {
+    fn free(HazardRecordImpl { record, .. }: &mut HazardRecordImpl) {
         debug_assert!(
             record.load(Ordering::Relaxed) != std::ptr::null_mut(),
             "null is reserved to mark free slots"
@@ -474,5 +485,23 @@ impl HazardRegistry {
                 DeletedList(old.split_off(0), self as *const Self)
             });
         });
+    }
+}
+
+pub struct HazardRegistry {
+    registry: Arc<HazardRegistryImpl>,
+}
+
+impl Default for HazardRegistry {
+    fn default() -> Self {
+        HazardRegistry {
+            registry: Arc::new(HazardRegistryImpl {
+                slots: HazardSlots::new(),
+                numslots: AtomicUsize::new(HP_CHUNKS),
+                deleted: ThreadLocal::new(|| {
+                    RefCell::new(DeletedList(Vec::new(), std::ptr::null()))
+                }),
+            }),
+        }
     }
 }
