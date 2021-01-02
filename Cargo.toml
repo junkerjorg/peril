@@ -1,6 +1,6 @@
 [package]
 name = "peril"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["junkerjorg <junkerjorg(twenty-one)(at)protonmail(dot)ch>"]
 edition = "2018"
 keywords = ["hazard", "pointer", "hazardpointer", "lock-free", "reclaimation"]

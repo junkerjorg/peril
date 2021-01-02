@@ -205,7 +205,7 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
         }
     }
 
-    /// get the (pointer) dummy value of HazardValue
+    /// get the (pointer) dummy value of HazardValue or return None if the value is not a dummy
     ///
     /// # Examples
     ///
@@ -223,7 +223,7 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
         }
     }
 
-    /// modify the data from a Boxed HazardValue and return None if the value is a dummy
+    /// modify the data from a Boxed HazardValue or return None if the value is a dummy
     /// this interface is unsafe because another thread could still read the data while it is modified
     /// if it is modified shortly after swapping it out while it is still protected on another thread
     ///
@@ -246,7 +246,7 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
         }
     }
 
-    /// modify the data from a Boxed HazardValue and return None if the value is still protected or a dummy
+    /// modify the data from a Boxed HazardValue or return None if the value is still protected or a dummy
     ///
     /// # Examples
     ///
@@ -272,7 +272,7 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
         }
     }
 
-    /// take the data from a Boxed HazardValue and return None if the value is a dummy
+    /// take the data from a Boxed HazardValue or return None if the value is a dummy
     /// this interface is unsafe because another thread could still read the data while it is taken
     /// if it is taken shortly after swapping it out while it is still protected on another thread
     ///
@@ -296,7 +296,7 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
         }
     }
 
-    /// take the data from a Boxed HazardValue and return None if the value is still protected or a dummy
+    /// take the data from a Boxed HazardValue or return None if the value is still protected or a dummy
     ///
     /// # Examples
     ///
