@@ -117,8 +117,36 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
         }
     }
 
-    pub fn as_mut(&mut self) -> Option<&mut T> {
+    pub fn is_boxed(&self) -> bool {
+        match self.0 {
+            HazardValueImpl::Boxed { .. } => true,
+            HazardValueImpl::Dummy { .. } => false,
+        }
+    }
+
+    pub fn is_dummy(&self) -> bool {
+        match self.0 {
+            HazardValueImpl::Boxed { .. } => false,
+            HazardValueImpl::Dummy { .. } => true,
+        }
+    }
+
+    pub unsafe fn as_mut(&mut self) -> Option<&mut T> {
         if let HazardValueImpl::Boxed { ptr, .. } = self.0 {
+            let ptr = &mut *ptr;
+            Some(ptr)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_mut_safe(&mut self) -> Option<&mut T> {
+        if let HazardValueImpl::Boxed { ptr, registry } = self.0 {
+            if let Some(registry) = registry {
+                if registry.scan_one(ptr) {
+                    return None;
+                }
+            }
             let ptr = unsafe { &mut *ptr };
             Some(ptr)
         } else {
@@ -126,8 +154,23 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
         }
     }
 
-    pub fn take(self) -> Option<T> {
+    pub unsafe fn take(self) -> Option<T> {
         if let HazardValueImpl::Boxed { ptr, .. } = self.0 {
+            let boxed = Box::from_raw(ptr);
+            self.0.leak();
+            Some(*boxed)
+        } else {
+            None
+        }
+    }
+
+    pub fn take_safe(self) -> Option<T> {
+        if let HazardValueImpl::Boxed { ptr, registry } = self.0 {
+            if let Some(registry) = registry {
+                if registry.scan_one(ptr) {
+                    return None;
+                }
+            }
             let boxed = unsafe { Box::from_raw(ptr) };
             self.0.leak();
             Some(*boxed)
@@ -288,7 +331,8 @@ impl<T: Send> HazardPtr<T> {
     }
 
     pub fn swap_null(&self, order: Ordering) -> HazardValue<'_, T> {
-        let old = self.atomic.swap(std::ptr::null_mut(), order);
+        //swapping 1 here because it represents the dummy 0
+        let old = self.atomic.swap(1 as *mut T, order);
         HazardValue::from_ptr(old, Some(&self.registry))
     }
 
@@ -305,7 +349,7 @@ impl<T: Send> Drop for HazardPtr<T> {
     }
 }
 
-pub const HP_CHUNKS: usize = 32;
+const HP_CHUNKS: usize = 32;
 
 #[repr(align(64))]
 struct AtomicPointer(AtomicPtr<()>);
@@ -452,6 +496,26 @@ impl<T: Send> HazardRegistryImpl<T> {
         }
         arr.sort();
         arr
+    }
+
+    fn scan_one(&self, ptr: *mut T) -> bool {
+        let mut slots = &self.slots;
+        loop {
+            for i in 0..HP_CHUNKS {
+                let slot = slots.slots[i].0.load(Ordering::Acquire);
+                if slot == ptr as *mut () {
+                    return true;
+                }
+            }
+
+            let next = slots.next.load(Ordering::Acquire);
+            if next == std::ptr::null_mut() {
+                break;
+            }
+
+            slots = unsafe { &*next };
+        }
+        false
     }
 
     fn delete(&self, raw: *mut T) {

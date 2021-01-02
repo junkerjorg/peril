@@ -62,7 +62,7 @@ impl<T: Send + Clone> HazardStack<T> {
         let value = self
             .hp
             .swap(HazardValue::boxed(Vec::new()), Ordering::Relaxed);
-        value.take().unwrap()
+        value.take_safe().unwrap()
     }
 }
 
