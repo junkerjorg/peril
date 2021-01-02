@@ -1,14 +1,15 @@
-use crate::{HazardPtr, HazardRecord, HazardRegistry, HazardValue};
+#[allow(dead_code)]
+use crate::{HazardPointer, HazardRecord, HazardRegistry, HazardValue};
 use std::sync::atomic::Ordering;
 
 pub struct HazardStack<T: Send + Clone> {
-    hp: HazardPtr<Vec<T>>,
+    hp: HazardPointer<Vec<T>>,
 }
 
 impl<T: Send + Clone> Default for HazardStack<T> {
     fn default() -> Self {
         let registry = HazardRegistry::default();
-        let hp = HazardPtr::new(HazardValue::boxed(Vec::new()), &registry);
+        let hp = HazardPointer::new(HazardValue::boxed(Vec::new()), &registry);
         HazardStack { hp }
     }
 }
@@ -109,5 +110,20 @@ pub fn test_hazard_vector() {
 
     for i in 0..vec2.len() {
         assert!(vec2[i] == i, "unexpected vec2 value");
+    }
+}
+
+#[test]
+pub fn test_dummy() {
+    use crate::{HazardPointer, HazardRecord, HazardRegistry, HazardValue};
+
+    let registry = HazardRegistry::<usize>::default();
+    let hp = HazardPointer::new(HazardValue::dummy(0), &registry);
+    let mut record = HazardRecord::default();
+    loop {
+        let scope = hp.protect(&mut record);
+        assert!(scope.is_dummy());
+        // ...
+        break;
     }
 }
