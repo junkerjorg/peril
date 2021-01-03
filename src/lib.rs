@@ -557,6 +557,39 @@ impl<'registry, 'hazard, T: Send + 'registry> HazardScope<'registry, 'hazard, T>
         }
     }
 
+    /// clone the HazardValue of a protected HazardPointer
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use peril::{HazardRegistry, HazardValue, HazardRecord, HazardPointer, Ordering};
+    ///
+    /// let registry = HazardRegistry::default();
+    /// let hp = HazardPointer::new(HazardValue::boxed(0), &registry);
+    /// let mut record = HazardRecord::default();
+    /// loop {
+    ///     let scope = hp.protect(&mut record);
+    ///     let cloned = scope.clone_value();
+    ///     if hp.compare_exchange(cloned, HazardValue::boxed(1), Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    ///     {
+    ///        break;
+    ///     }
+    /// }
+    /// ```
+    pub fn clone_value(&self) -> HazardValue<T> {
+        if HazardValueImpl::is_dummy(self.current) {
+            HazardValue(HazardValueImpl::Dummy { ptr: self.current })
+        } else {
+            let boxed = unsafe { Arc::from_raw(self.current as *const Box<T>) };
+            let boxed_clone = boxed.clone();
+            Arc::into_raw(boxed);
+            HazardValue(HazardValueImpl::Boxed {
+                ptr: Arc::into_raw(boxed_clone),
+                registry: Some(self.registry),
+            })
+        }
+    }
+
     /// checks if the underlying atomic value already changed
     ///
     /// # Examples
