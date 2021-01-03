@@ -29,7 +29,7 @@ fn aquire_threadid() -> usize {
 
 enum HazardValueImpl<'registry, T: Send + 'registry> {
     Boxed {
-        ptr: *mut T,
+        ptr: *const Box<T>,
         registry: Option<&'registry HazardRegistryImpl<T>>,
     },
     Dummy {
@@ -51,7 +51,7 @@ impl<'registry, T: Send + 'registry> HazardValueImpl<'registry, T> {
 
     fn as_ptr(&self) -> *mut T {
         match self {
-            HazardValueImpl::Boxed { ptr, .. } => *ptr,
+            HazardValueImpl::Boxed { ptr, .. } => *ptr as *mut T,
             HazardValueImpl::Dummy { ptr } => *ptr,
         }
     }
@@ -65,7 +65,7 @@ impl<'registry, T: Send + 'registry> Drop for HazardValueImpl<'registry, T> {
                 if let Some(registry) = registry.take() {
                     registry.delete(ptr);
                 } else {
-                    let boxed = unsafe { Box::from_raw(ptr) };
+                    let boxed = unsafe { Arc::from_raw(ptr) };
                     drop(boxed);
                 }
             }
@@ -104,10 +104,10 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
     /// let boxed = HazardValue::boxed("test");
     /// ```
     pub fn boxed(value: T) -> HazardValue<'registry, T> {
-        let boxed = Box::new(value);
-        let ptr = Box::into_raw(boxed);
+        let boxed = Arc::new(Box::new(value));
+        let ptr = Arc::into_raw(boxed);
         debug_assert!(
-            !HazardValueImpl::is_dummy(ptr),
+            !HazardValueImpl::is_dummy(ptr as *mut T),
             "unexpected low bit set in allocation"
         );
         HazardValue(HazardValueImpl::Boxed {
@@ -145,7 +145,7 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
         if HazardValueImpl::is_dummy(ptr) {
             HazardValue(HazardValueImpl::Dummy { ptr })
         } else {
-            HazardValue(HazardValueImpl::Boxed { ptr, registry })
+            HazardValue(HazardValueImpl::Boxed { ptr: ptr as *const Box<T>, registry })
         }
     }
 
@@ -162,7 +162,7 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
     /// ```
     pub fn as_ref(&self) -> Option<&T> {
         if let HazardValueImpl::Boxed { ptr, .. } = self.0 {
-            let ptr = unsafe { &*ptr };
+            let ptr = unsafe { &**ptr };
             Some(ptr)
         } else {
             None
@@ -223,12 +223,7 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
         }
     }
 
-    /// modify the data from a Boxed HazardValue or return None if the value is a dummy
-    ///
-    /// # Safety
-    ///
-    /// this interface is unsafe because another thread could still read the data while it is modified
-    /// if it is modified shortly after swapping it out while it is still protected on another thread
+    /// clones the data from a Boxed HazardValue if T: Clone or return None if the value is a dummy
     ///
     /// # Examples
     ///
@@ -237,97 +232,51 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
     ///
     /// // creating a boxed value
     /// let mut boxed = HazardValue::boxed(1);
-    /// *unsafe{ boxed.as_mut().unwrap() } = 2;
-    /// assert!(boxed.as_ref().unwrap() == &2);
-    /// ```
-    pub unsafe fn as_mut(&mut self) -> Option<&mut T> {
-        if let HazardValueImpl::Boxed { ptr, .. } = self.0 {
-            let ptr = &mut *ptr;
-            Some(ptr)
-        } else {
-            None
-        }
-    }
-
-    /// modify the data from a Boxed HazardValue or return None if the value is still protected or a dummy
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use peril::HazardValue;
-    ///
-    /// // creating a boxed value
-    /// let mut boxed = HazardValue::boxed(1);
-    /// *boxed.as_mut_safe().unwrap() = 2;
-    /// assert!(boxed.as_ref().unwrap() == &2);
-    /// ```
-    pub fn as_mut_safe(&mut self) -> Option<&mut T> {
-        if let HazardValueImpl::Boxed { ptr, registry } = self.0 {
-            if let Some(registry) = registry {
-                if registry.scan_one(ptr) {
-                    return None;
-                }
-            }
-            let ptr = unsafe { &mut *ptr };
-            Some(ptr)
-        } else {
-            None
-        }
-    }
-
-    /// take the data from a Boxed HazardValue or return None if the value is a dummy
-    ///
-    /// # Safety
-    ///
-    /// this interface is unsafe because another thread could still read the data while it is taken
-    /// if it is taken shortly after swapping it out while it is still protected on another thread
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use peril::HazardValue;
-    ///
-    /// // creating a boxed value
-    /// let mut boxed = HazardValue::boxed(1);
-    /// let taken = unsafe{ boxed.take().unwrap() };
+    /// let taken = boxed.clone_inner().unwrap();
     /// assert!(taken == 1);
     /// ```
-    pub unsafe fn take(self) -> Option<T> {
+    pub fn clone_inner(self) -> Option<T> where T: Clone {
         if let HazardValueImpl::Boxed { ptr, .. } = self.0 {
-            let boxed = Box::from_raw(ptr);
+            let boxed = unsafe { Arc::from_raw(ptr) };
             self.0.leak();
-            Some(*boxed)
+            Some((**boxed).clone())
         } else {
             None
         }
     }
+}
 
-    /// take the data from a Boxed HazardValue or return None if the value is still protected or a dummy
+impl<'registry, T: Send + 'registry> Clone for HazardValue<'registry, T>
+{
+    /// clones the HazardValue itself
     ///
     /// # Examples
     ///
     /// ```
-    /// use peril::HazardValue;
+    /// use peril::{HazardRegistry, HazardValue, HazardRecord, HazardPointer, Ordering};
     ///
     /// // creating a boxed value
-    /// let mut boxed = HazardValue::boxed(1);
-    /// let taken = boxed.take_safe().unwrap();
-    /// assert!(taken == 1);
+    /// let boxed = HazardValue::boxed(1);
+    /// let clone = boxed.clone();
+    ///
+    /// let registry = HazardRegistry::default();
+    /// let hp = HazardPointer::new(boxed, &registry);
+    /// let ok = hp.compare_exchange(clone, HazardValue::dummy(0), Ordering::Relaxed, Ordering::Relaxed).is_ok();
+    /// assert!(ok);
     /// ```
-    pub fn take_safe(self) -> Option<T> {
-        if let HazardValueImpl::Boxed { ptr, registry } = self.0 {
-            if let Some(registry) = registry {
-                if registry.scan_one(ptr) {
-                    return None;
-                }
-            }
-            let boxed = unsafe { Box::from_raw(ptr) };
-            self.0.leak();
-            Some(*boxed)
-        } else {
-            None
+    fn clone(&self) -> Self {
+        match self.0
+        {
+            HazardValueImpl::Boxed{ptr, registry} => 
+            {
+                let boxed  = unsafe { Arc::from_raw(ptr) };
+                let boxed_clone = boxed.clone();
+                Arc::into_raw(boxed);
+                HazardValue(HazardValueImpl::Boxed{ptr: Arc::into_raw(boxed_clone), registry})
+            },
+            HazardValueImpl::Dummy{ptr} => HazardValue(HazardValueImpl::Dummy{ptr}),
         }
-    }
+    }  
 }
 
 struct HazardRecordImpl<'registry> {
@@ -597,7 +546,7 @@ impl<'registry, 'hazard, T: Send + 'registry> HazardScope<'registry, 'hazard, T>
         if HazardValueImpl::is_dummy(self.current) {
             None
         } else {
-            let reference = unsafe { &*self.current };
+            let reference = unsafe { &**(self.current as *const Box<T>) };
             Some(reference)
         }
     }
@@ -685,13 +634,13 @@ impl<T: Send> HazardPointer<T> {
         }
     }
 
-    /// compare_exchange_weak version of HazardPointer that uses a dummy value (usize) as it's current value (comperator)
-    /// When the CAS fails it will return the new value we just provided.
-    /// for more detail see [compare_exchange_weak](std::sync::atomic::AtomicPtr::compare_exchange_weak)
+    /// compare_exchange_weak version of HazardPointer that uses a HazardValue as it's current value (comperator)
+    /// When the CAS succeeds it will return the previous value held by the HazardPointer and when the CAS fails it will return the new value we just provided.
+    /// for more detail see [compare_exchange](std::sync::atomic::AtomicPtr::compare_exchange)
     ///
     /// # Arguments
     ///
-    /// * `current` - dummy value as usize used for the comparission
+    /// * `current` - the HazardValue used as a comparator
     /// * `new` - the new value the HazardPointer should have when the CAS succeeds (and returned when the CAS fails)
     /// * `success` - the [Ordering](std::sync::atomic::Ordering) when the CAS succeeds
     /// * `failure` - the [Ordering](std::sync::atomic::Ordering) when the CAS fails
@@ -705,7 +654,7 @@ impl<T: Send> HazardPointer<T> {
     /// let registry = HazardRegistry::default();
     /// let hp = HazardPointer::<usize>::new(HazardValue::dummy(1), &registry);
     /// loop {
-    ///     if hp.compare_exchange_weak(1, HazardValue::dummy(0), Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    ///     if hp.compare_exchange_weak(HazardValue::dummy(1), HazardValue::dummy(0), Ordering::Relaxed, Ordering::Relaxed).is_ok()
     ///     {
     ///         break;
     ///     }
@@ -713,33 +662,32 @@ impl<T: Send> HazardPointer<T> {
     /// ```
     pub fn compare_exchange_weak<'registry>(
         &'registry self,
-        current: usize,
+        current: HazardValue<'registry, T>,
         new: HazardValue<'registry, T>,
         success: Ordering,
         failure: Ordering,
-    ) -> Result<(), HazardValue<'registry, T>> {
-        let current = HazardValue::dummy(current);
+    ) -> Result<HazardValue<'registry, T>, HazardValue<'registry, T>> {
         match self.atomic.compare_exchange_weak(
             current.0.as_ptr(),
             new.0.as_ptr(),
             success,
             failure,
         ) {
-            Ok(_) => {
+            Ok(old) => {
                 new.0.leak();
-                Ok(())
+                Ok(HazardValue::from_ptr(old, Some(&self.registry)))
             }
             Err(_) => Err(new),
         }
     }
 
-    /// compare_exchange version of HazardPointer that uses a dummy value (usize) as it's current value (comperator)
-    /// When the CAS fails it will return the new value we just provided.
+    /// compare_exchange version of HazardPointer that uses a HazardValue as it's current value (comperator)
+    /// When the CAS succeeds it will return the previous value held by the HazardPointer and when the CAS fails it will return the new value we just provided.
     /// for more detail see [compare_exchange](std::sync::atomic::AtomicPtr::compare_exchange)
     ///
     /// # Arguments
     ///
-    /// * `current` - dummy value as usize used for the comparission
+    /// * `current` - the HazardValue used as a comparator
     /// * `new` - the new value the HazardPointer should have when the CAS succeeds (and returned when the CAS fails)
     /// * `success` - the [Ordering](std::sync::atomic::Ordering) when the CAS succeeds
     /// * `failure` - the [Ordering](std::sync::atomic::Ordering) when the CAS fails
@@ -753,7 +701,7 @@ impl<T: Send> HazardPointer<T> {
     /// let registry = HazardRegistry::default();
     /// let hp = HazardPointer::<usize>::new(HazardValue::dummy(1), &registry);
     /// loop {
-    ///     if hp.compare_exchange(1, HazardValue::dummy(0), Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    ///     if hp.compare_exchange(HazardValue::dummy(1), HazardValue::dummy(0), Ordering::Relaxed, Ordering::Relaxed).is_ok()
     ///     {
     ///         break;
     ///     }
@@ -761,19 +709,18 @@ impl<T: Send> HazardPointer<T> {
     /// ```
     pub fn compare_exchange<'registry>(
         &'registry self,
-        current: usize,
+        current: HazardValue<'registry, T>,
         new: HazardValue<'registry, T>,
         success: Ordering,
         failure: Ordering,
-    ) -> Result<(), HazardValue<'registry, T>> {
-        let current = HazardValue::dummy(current);
+    ) -> Result<HazardValue<'registry, T>, HazardValue<'registry, T>> {
         match self
             .atomic
             .compare_exchange(current.0.as_ptr(), new.0.as_ptr(), success, failure)
         {
-            Ok(_) => {
+            Ok(old) => {
                 new.0.leak();
-                Ok(())
+                Ok(HazardValue::from_ptr(old, Some(&self.registry)))
             }
             Err(_) => Err(new),
         }
@@ -955,7 +902,7 @@ impl<T: Send> HazardSlots<T> {
     }
 }
 
-struct DeletedItem<T: Send>(*mut (), Box<T>);
+struct DeletedItem<T: Send>(*mut (), Arc<Box<T>>);
 
 struct DeletedList<T: Send>(Vec<DeletedItem<T>>, *const HazardRegistryImpl<T>);
 
@@ -1009,30 +956,10 @@ impl<T: Send> HazardRegistryImpl<T> {
         arr
     }
 
-    fn scan_one(&self, ptr: *mut T) -> bool {
-        let mut slots = &self.slots;
-        loop {
-            for i in 0..HP_CHUNKS {
-                let slot = slots.slots[i].0.load(Ordering::Acquire);
-                if slot == ptr as *mut () {
-                    return true;
-                }
-            }
-
-            let next = slots.next.load(Ordering::Acquire);
-            if next == std::ptr::null_mut() {
-                break;
-            }
-
-            slots = unsafe { &*next };
-        }
-        false
-    }
-
-    fn delete(&self, raw: *mut T) {
+    fn delete(&self, raw: *const Box<T>) {
         self.deleted.with(|arr| {
             arr.replace_with(|&mut DeletedList(ref mut old, _)| {
-                let boxed = unsafe { Box::from_raw(raw) };
+                let boxed = unsafe { Arc::from_raw(raw) };
                 old.push(DeletedItem(raw as *mut (), boxed));
 
                 if old.len() >= (5 * self.numslots.load(Ordering::Relaxed)) / 4 {
