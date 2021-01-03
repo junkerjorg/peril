@@ -145,7 +145,10 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
         if HazardValueImpl::is_dummy(ptr) {
             HazardValue(HazardValueImpl::Dummy { ptr })
         } else {
-            HazardValue(HazardValueImpl::Boxed { ptr: ptr as *const Box<T>, registry })
+            HazardValue(HazardValueImpl::Boxed {
+                ptr: ptr as *const Box<T>,
+                registry,
+            })
         }
     }
 
@@ -235,7 +238,10 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
     /// let taken = boxed.clone_inner().unwrap();
     /// assert!(taken == 1);
     /// ```
-    pub fn clone_inner(self) -> Option<T> where T: Clone {
+    pub fn clone_inner(self) -> Option<T>
+    where
+        T: Clone,
+    {
         if let HazardValueImpl::Boxed { ptr, .. } = self.0 {
             let boxed = unsafe { Arc::from_raw(ptr) };
             self.0.leak();
@@ -246,8 +252,7 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
     }
 }
 
-impl<'registry, T: Send + 'registry> Clone for HazardValue<'registry, T>
-{
+impl<'registry, T: Send + 'registry> Clone for HazardValue<'registry, T> {
     /// clones the HazardValue itself
     ///
     /// # Examples
@@ -265,18 +270,19 @@ impl<'registry, T: Send + 'registry> Clone for HazardValue<'registry, T>
     /// assert!(ok);
     /// ```
     fn clone(&self) -> Self {
-        match self.0
-        {
-            HazardValueImpl::Boxed{ptr, registry} => 
-            {
-                let boxed  = unsafe { Arc::from_raw(ptr) };
+        match self.0 {
+            HazardValueImpl::Boxed { ptr, registry } => {
+                let boxed = unsafe { Arc::from_raw(ptr) };
                 let boxed_clone = boxed.clone();
                 Arc::into_raw(boxed);
-                HazardValue(HazardValueImpl::Boxed{ptr: Arc::into_raw(boxed_clone), registry})
-            },
-            HazardValueImpl::Dummy{ptr} => HazardValue(HazardValueImpl::Dummy{ptr}),
+                HazardValue(HazardValueImpl::Boxed {
+                    ptr: Arc::into_raw(boxed_clone),
+                    registry,
+                })
+            }
+            HazardValueImpl::Dummy { ptr } => HazardValue(HazardValueImpl::Dummy { ptr }),
         }
-    }  
+    }
 }
 
 struct HazardRecordImpl<'registry> {
