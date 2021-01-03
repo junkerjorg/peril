@@ -685,6 +685,100 @@ impl<T: Send> HazardPointer<T> {
         }
     }
 
+    /// compare_exchange_weak version of HazardPointer that uses a dummy value (usize) as it's current value (comperator)
+    /// When the CAS fails it will return the new value we just provided.
+    /// for more detail see [compare_exchange_weak](std::sync::atomic::AtomicPtr::compare_exchange_weak)
+    ///
+    /// # Arguments
+    ///
+    /// * `current` - dummy value as usize used for the comparission
+    /// * `new` - the new value the HazardPointer should have when the CAS succeeds (and returned when the CAS fails)
+    /// * `success` - the [Ordering](std::sync::atomic::Ordering) when the CAS succeeds
+    /// * `failure` - the [Ordering](std::sync::atomic::Ordering) when the CAS fails
+    /// * `return` - Result wrapping the old value if the CAS succeeds or the new value if it failed
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use peril::{HazardRegistry, HazardValue, HazardPointer, Ordering};
+    ///
+    /// let registry = HazardRegistry::default();
+    /// let hp = HazardPointer::<usize>::new(HazardValue::dummy(1), &registry);
+    /// loop {
+    ///     if hp.compare_exchange_weak(1, HazardValue::dummy(0), Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    ///     {
+    ///         break;
+    ///     }
+    /// }
+    /// ```
+    pub fn compare_exchange_weak<'registry>(
+        &'registry self,
+        current: usize,
+        new: HazardValue<'registry, T>,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<(), HazardValue<'registry, T>> {
+        let current = HazardValue::dummy(current);
+        match self.atomic.compare_exchange_weak(
+            current.0.as_ptr(),
+            new.0.as_ptr(),
+            success,
+            failure,
+        ) {
+            Ok(_) => {
+                new.0.leak();
+                Ok(())
+            }
+            Err(_) => Err(new),
+        }
+    }
+
+    /// compare_exchange version of HazardPointer that uses a dummy value (usize) as it's current value (comperator)
+    /// When the CAS fails it will return the new value we just provided.
+    /// for more detail see [compare_exchange](std::sync::atomic::AtomicPtr::compare_exchange)
+    ///
+    /// # Arguments
+    ///
+    /// * `current` - dummy value as usize used for the comparission
+    /// * `new` - the new value the HazardPointer should have when the CAS succeeds (and returned when the CAS fails)
+    /// * `success` - the [Ordering](std::sync::atomic::Ordering) when the CAS succeeds
+    /// * `failure` - the [Ordering](std::sync::atomic::Ordering) when the CAS fails
+    /// * `return` - Result wrapping the old value if the CAS succeeds or the new value if it failed
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use peril::{HazardRegistry, HazardValue, HazardPointer, Ordering};
+    ///
+    /// let registry = HazardRegistry::default();
+    /// let hp = HazardPointer::<usize>::new(HazardValue::dummy(1), &registry);
+    /// loop {
+    ///     if hp.compare_exchange(1, HazardValue::dummy(0), Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    ///     {
+    ///         break;
+    ///     }
+    /// }
+    /// ```
+    pub fn compare_exchange<'registry>(
+        &'registry self,
+        current: usize,
+        new: HazardValue<'registry, T>,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<(), HazardValue<'registry, T>> {
+        let current = HazardValue::dummy(current);
+        match self
+            .atomic
+            .compare_exchange(current.0.as_ptr(), new.0.as_ptr(), success, failure)
+        {
+            Ok(_) => {
+                new.0.leak();
+                Ok(())
+            }
+            Err(_) => Err(new),
+        }
+    }
+
     /// swaps the value of a HazardPointer returning the old value
     ///
     /// # Arguments
