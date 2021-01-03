@@ -224,6 +224,9 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
     }
 
     /// modify the data from a Boxed HazardValue or return None if the value is a dummy
+    ///
+    /// # Safety
+    ///
     /// this interface is unsafe because another thread could still read the data while it is modified
     /// if it is modified shortly after swapping it out while it is still protected on another thread
     ///
@@ -273,6 +276,9 @@ impl<'registry, T: Send + 'registry> HazardValue<'registry, T> {
     }
 
     /// take the data from a Boxed HazardValue or return None if the value is a dummy
+    ///
+    /// # Safety
+    ///
     /// this interface is unsafe because another thread could still read the data while it is taken
     /// if it is taken shortly after swapping it out while it is still protected on another thread
     ///
@@ -867,10 +873,7 @@ impl<T: Send> Drop for DeletedList<T> {
                 if self.0.is_empty() {
                     break;
                 }
-                let hazards = registry.scan();
-                self.0.retain(|DeletedItem(ptr, ..)| {
-                    hazards.binary_search(&(*ptr as *mut ())).is_ok()
-                });
+                DeletedList::delete(&mut self.0, registry);
                 std::thread::yield_now();
             }
         }
@@ -891,11 +894,12 @@ impl<T: Send> HazardRegistryImpl<T> {
 
     fn scan(&self) -> Vec<*mut ()> {
         let mut arr = Vec::new();
+        arr.reserve(self.numslots.load(Ordering::Relaxed));
         let mut slots = &self.slots;
         loop {
             for i in 0..HP_CHUNKS {
                 let slot = slots.slots[i].0.load(Ordering::Acquire);
-                if slot != std::ptr::null_mut() {
+                if slot != std::ptr::null_mut() && !HazardValueImpl::is_dummy(slot as *mut T) {
                     arr.push(slot);
                 }
             }
@@ -938,14 +942,18 @@ impl<T: Send> HazardRegistryImpl<T> {
                 old.push(DeletedItem(raw as *mut (), boxed));
 
                 if old.len() >= (5 * self.numslots.load(Ordering::Relaxed)) / 4 {
-                    let hazards = self.scan();
-                    old.retain(|DeletedItem(ptr, ..)| {
-                        hazards.binary_search(&(*ptr as *mut ())).is_ok()
-                    });
+                    DeletedList::delete(old, self);
                 }
                 DeletedList(old.split_off(0), self as *const Self)
             });
         });
+    }
+}
+
+impl<T: Send> DeletedList<T> {
+    fn delete(list: &mut Vec<DeletedItem<T>>, registry: &HazardRegistryImpl<T>) {
+        let hazards = registry.scan();
+        list.retain(|DeletedItem(ptr, ..)| hazards.binary_search(&(*ptr as *mut ())).is_ok());
     }
 }
 
