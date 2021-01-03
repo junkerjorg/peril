@@ -20,7 +20,7 @@ peril = "0.2"
 
 than use the HazardPointers in your lock-free update loop:
 
-```Rust
+```rust
 use peril::{HazardRegistry, HazardValue, HazardRecord, HazardPointer, Ordering};
 
 let registry = HazardRegistry::default();
