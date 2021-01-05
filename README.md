@@ -15,7 +15,7 @@ Add these lines to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-peril = "0.2"
+peril = "0.4"
 ```
 
 than use the HazardPointers in your lock-free update loop:
