@@ -640,7 +640,6 @@ impl<T: Send> HazardPointer<T> {
     /// # Arguments
     ///
     /// * `value` - the HazardValue the pointer is initzialized with
-    /// * `registry` - the HazardRegistry the pointer is registered with, usually HazardPointers in the same system share a common Registry
     ///
     /// # Examples
     ///
@@ -659,6 +658,7 @@ impl<T: Send> HazardPointer<T> {
     ///
     /// # Arguments
     ///
+    /// * `registry` - the HazardRegistry the pointer is registered with, usually HazardPointers in the same system share a common Registry
     /// * `record` - the HazardRecord, which caches an expensive operation for multiple itterations of the update loop
     ///
     /// # Examples
@@ -700,6 +700,7 @@ impl<T: Send> HazardPointer<T> {
     ///
     /// # Arguments
     ///
+    /// * `registry` - the HazardRegistry the pointer is registered with, usually HazardPointers in the same system share a common Registry
     /// * `current` - the HazardValue used as a comparator
     /// * `new` - the new value the HazardPointer should have when the CAS succeeds (and returned when the CAS fails)
     /// * `success` - the [Ordering](std::sync::atomic::Ordering) when the CAS succeeds
@@ -748,6 +749,7 @@ impl<T: Send> HazardPointer<T> {
     ///
     /// # Arguments
     ///
+    /// * `registry` - the HazardRegistry the pointer is registered with, usually HazardPointers in the same system share a common Registry
     /// * `current` - the HazardValue used as a comparator
     /// * `new` - the new value the HazardPointer should have when the CAS succeeds (and returned when the CAS fails)
     /// * `success` - the [Ordering](std::sync::atomic::Ordering) when the CAS succeeds
@@ -792,6 +794,7 @@ impl<T: Send> HazardPointer<T> {
     ///
     /// # Arguments
     ///
+    /// * `registry` - the HazardRegistry the pointer is registered with, usually HazardPointers in the same system share a common Registry
     /// * `new` - the HazardValue after the swap
     /// * `order` - the [Ordering](std::sync::atomic::Ordering) during the swap operation
     /// * `return` - the HazardValue before the swap
@@ -820,6 +823,7 @@ impl<T: Send> HazardPointer<T> {
     ///
     /// # Arguments
     ///
+    /// * `registry` - the HazardRegistry the pointer is registered with, usually HazardPointers in the same system share a common Registry
     /// * `order` - the [Ordering](std::sync::atomic::Ordering) during the swap operation
     /// * `return` - the HazardValue before the swap
     ///
@@ -849,6 +853,7 @@ impl<T: Send> HazardPointer<T> {
     ///
     /// # Arguments
     ///
+    /// * `registry` - the HazardRegistry the pointer is registered with, usually HazardPointers in the same system share a common Registry
     /// * `new` - the HazardValue after the store
     /// * `order` - the [Ordering](std::sync::atomic::Ordering) during the store operation
     ///
