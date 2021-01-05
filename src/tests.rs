@@ -3,14 +3,15 @@ use crate::{HazardPointer, HazardRecord, HazardRegistry, HazardValue};
 use std::sync::atomic::Ordering;
 
 pub struct HazardStack<T: Send + Clone> {
+    registry: HazardRegistry<Vec<T>>,
     hp: HazardPointer<Vec<T>>,
 }
 
 impl<T: Send + Clone> Default for HazardStack<T> {
     fn default() -> Self {
         let registry = HazardRegistry::default();
-        let hp = HazardPointer::new(HazardValue::boxed(Vec::new()), &registry);
-        HazardStack { hp }
+        let hp = HazardPointer::new(HazardValue::boxed(Vec::new()));
+        HazardStack { hp, registry }
     }
 }
 
@@ -18,7 +19,7 @@ impl<T: Send + Clone> HazardStack<T> {
     pub fn push(&self, item: T) {
         let mut record = HazardRecord::default();
         loop {
-            let scope = self.hp.protect(&mut record);
+            let scope = self.hp.protect(&self.registry, &mut record);
             let reference = scope.as_ref().unwrap();
             let mut new = (*reference).clone();
 
@@ -40,7 +41,7 @@ impl<T: Send + Clone> HazardStack<T> {
     pub fn pop(&self) -> Option<T> {
         let mut record = HazardRecord::default();
         loop {
-            let scope = self.hp.protect(&mut record);
+            let scope = self.hp.protect(&self.registry, &mut record);
             let reference = scope.as_ref().unwrap();
             let mut new = (*reference).clone();
 
@@ -60,9 +61,11 @@ impl<T: Send + Clone> HazardStack<T> {
     }
 
     pub fn take_inner(&self) -> Vec<T> {
-        let value = self
-            .hp
-            .swap(HazardValue::boxed(Vec::new()), Ordering::Relaxed);
+        let value = self.hp.swap(
+            &self.registry,
+            HazardValue::boxed(Vec::new()),
+            Ordering::Relaxed,
+        );
         value.clone_inner().unwrap()
     }
 }
@@ -118,10 +121,10 @@ pub fn test_dummy() {
     use crate::{HazardPointer, HazardRecord, HazardRegistry, HazardValue};
 
     let registry = HazardRegistry::<usize>::default();
-    let hp = HazardPointer::new(HazardValue::dummy(0), &registry);
+    let hp = HazardPointer::new(HazardValue::dummy(0));
     let mut record = HazardRecord::default();
     loop {
-        let scope = hp.protect(&mut record);
+        let scope = hp.protect(&registry, &mut record);
         assert!(scope.is_dummy());
         // ...
         break;
